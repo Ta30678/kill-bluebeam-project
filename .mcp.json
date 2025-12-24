@@ -1,0 +1,46 @@
+{
+  "mcpServers": {
+    "project-filesystem": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "C:/Users/User/Desktop/kill-bluebeam-project-main"
+      ]
+    },
+    "filesystem": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "C:/Users/User/Documents",
+        "C:/Users/User/Desktop/kill-bluebeam-project-main",
+        "C:/Users/User/Desktop/BEAM-NAMINGTOOL-main"
+      ]
+    },
+    "sqlite": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-sqlite",
+        "--db-path",
+        "C:/Users/User/data.db"
+      ]
+    },
+    "chrome-devtools": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "chrome-devtools-mcp@latest"
+      ]
+    }
+  }
+}
