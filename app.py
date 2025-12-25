@@ -148,6 +148,8 @@ def parse_dxf():
         "success": True,
         "project_id": project_id,
         "layers": layers,  # 所有圖層資訊
+        "dimscale": parser.dimscale,  # DXF DIMSCALE (尺寸縮放比例)
+        "insunits": parser.insunits,  # DXF INSUNITS (插入單位)
         "total_segment_count": count,  # 總線段數
         "selected_segment_count": selected_segment_count,  # 選中的線段數
         "segments": [seg.to_dict() for seg in all_segments]  # 返回所有線段用於繪圖

@@ -1,12 +1,25 @@
 """
 DXF Parser for Wall Quantity Calculator
 提取 DXF 檔案中的圖層資訊和幾何實體，計算各類型牆的長度
+使用 DXF Group Codes 資料庫進行解析
 """
 import ezdxf
 import math
 import json
-from typing import Dict, List, Tuple, Any
-from dataclasses import dataclass, asdict
+from typing import Dict, List, Tuple, Any, Optional
+from dataclasses import dataclass, asdict, field
+
+# 導入 DXF 組碼資料庫
+try:
+    from dxf_group_codes import (
+        DXF_GROUP_CODES, DXF_HEADER_VARIABLES, DXF_ENTITY_TYPES,
+        get_group_code_info, get_header_variable_info, get_entity_type_info,
+        get_units_conversion_factor, interpret_group_code, GroupCodeCategory
+    )
+    DXF_DB_AVAILABLE = True
+except ImportError:
+    DXF_DB_AVAILABLE = False
+    print("[!] DXF Group Codes database not available")
 
 @dataclass
 class WallSegment:
@@ -31,6 +44,8 @@ class DXFParser:
         self.layers: Dict[str, dict] = {}
         self.segments: List[WallSegment] = []
         self._segment_counter = 0
+        self.dimscale = 1.0  # DXF DIMSCALE 變數（尺寸縮放比例）
+        self.insunits = 0    # DXF INSUNITS 變數（插入單位）
     
     def load(self):
         """載入 DXF 檔案（支援多種版本和編碼）"""
@@ -62,6 +77,25 @@ class DXFParser:
                 if self.doc.modelspace() is None:
                     print("     [!] 警告：模型空間為空")
                     continue
+
+                # 讀取 DXF 標頭變數
+                try:
+                    self.dimscale = self.doc.header.get('$DIMSCALE', 1.0)
+                    print(f"     DIMSCALE: {self.dimscale}")
+                except:
+                    self.dimscale = 1.0
+                    print("     DIMSCALE: 1.0 (預設)")
+
+                try:
+                    self.insunits = self.doc.header.get('$INSUNITS', 0)
+                    units_map = {
+                        0: "未指定", 1: "英寸", 2: "英尺", 3: "英里",
+                        4: "毫米", 5: "公分", 6: "公尺", 7: "公里"
+                    }
+                    print(f"     INSUNITS: {self.insunits} ({units_map.get(self.insunits, '其他')})")
+                except:
+                    self.insunits = 0
+                    print("     INSUNITS: 0 (未指定)")
 
                 return True
 
@@ -110,6 +144,79 @@ class DXFParser:
         print(f"\n找到 {len(self.layers)} 個圖層")
 
         return self.layers
+    
+    def extract_header_info(self) -> Dict[str, Any]:
+        """
+        提取並解釋 DXF 標頭變數
+        使用 DXF Group Codes 資料庫進行解釋
+        """
+        if not self.doc:
+            return {}
+        
+        header_info = {}
+        
+        # 常用的標頭變數列表
+        important_vars = [
+            '$DIMSCALE', '$DIMLFAC', '$INSUNITS', '$LUNITS', '$LUPREC',
+            '$EXTMIN', '$EXTMAX', '$LIMMIN', '$LIMMAX',
+            '$CLAYER', '$CECOLOR', '$CELTYPE', '$LTSCALE',
+            '$ACADVER', '$DWGCODEPAGE'
+        ]
+        
+        for var_name in important_vars:
+            try:
+                value = self.doc.header.get(var_name)
+                if value is not None:
+                    var_info = {
+                        "value": value,
+                        "raw_value": str(value)
+                    }
+                    
+                    # 使用 DXF 組碼資料庫提供詳細資訊
+                    if DXF_DB_AVAILABLE:
+                        db_info = get_header_variable_info(var_name)
+                        if db_info:
+                            var_info["description_zh"] = db_info.get("description_zh", "")
+                            var_info["description_en"] = db_info.get("description_en", "")
+                            var_info["type"] = db_info.get("type", "unknown")
+                            
+                            # 如果有值對照表，提供解釋
+                            if "values" in db_info and value in db_info["values"]:
+                                var_info["interpreted"] = db_info["values"][value]
+                    
+                    header_info[var_name] = var_info
+            except Exception as e:
+                print(f"  [!] 無法讀取 {var_name}: {e}")
+        
+        # 輸出重要資訊摘要
+        print(f"\n=== DXF 標頭變數摘要 ===")
+        print(f"  DIMSCALE: {header_info.get('$DIMSCALE', {}).get('value', 'N/A')}")
+        print(f"  INSUNITS: {header_info.get('$INSUNITS', {}).get('value', 'N/A')}")
+        if DXF_DB_AVAILABLE and '$INSUNITS' in header_info:
+            insunits = header_info['$INSUNITS'].get('value', 0)
+            units_info = get_header_variable_info('$INSUNITS')
+            if units_info and 'values' in units_info:
+                print(f"           ({units_info['values'].get(insunits, '未知')})")
+        
+        return header_info
+    
+    def get_calculated_scale(self) -> float:
+        """
+        計算真實的比例係數
+        結合 DIMSCALE 和 INSUNITS 計算正確的測量比例
+        """
+        # 基本比例 = DIMSCALE
+        scale = self.dimscale
+        
+        # 如果有 INSUNITS，可以進一步調整
+        if DXF_DB_AVAILABLE and self.insunits > 0:
+            # 取得單位轉換係數（轉為毫米）
+            unit_factor = get_units_conversion_factor(self.insunits, "mm")
+            # 如果單位不是毫米，需要調整
+            if unit_factor != 1.0:
+                print(f"  單位轉換係數: {unit_factor}")
+        
+        return scale
     
     def _generate_id(self) -> str:
         """生成唯一 ID"""
@@ -530,6 +637,8 @@ class DXFParser:
         """匯出為 JSON 格式（供前端使用）"""
         data = {
             "source_file": self.filepath,
+            "dimscale": self.dimscale,
+            "insunits": self.insunits,
             "layers": self.layers,
             "segments": [seg.to_dict() for seg in self.segments],
             "summary": self.summarize_by_layer()
