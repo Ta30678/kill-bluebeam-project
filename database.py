@@ -83,6 +83,8 @@ class DatabaseManager:
                 color TEXT DEFAULT '#888888',
                 line_weight REAL DEFAULT 1.0,
                 display_order INTEGER DEFAULT 0,
+                wall_thickness REAL DEFAULT NULL,
+                wall_thickness_tolerance REAL DEFAULT 1.0,
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
                 UNIQUE(project_id, category_code)
             )
@@ -119,10 +121,14 @@ class DatabaseManager:
                 length REAL NOT NULL,
                 vertices_json TEXT,
                 is_modified INTEGER DEFAULT 0,
+                is_merged INTEGER DEFAULT 0,
+                merged_into_id INTEGER DEFAULT NULL,
+                merge_excluded INTEGER DEFAULT 0,
                 notes TEXT,
                 FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
                 FOREIGN KEY (floor_id) REFERENCES floors(id) ON DELETE SET NULL,
                 FOREIGN KEY (category_id) REFERENCES wall_categories(id) ON DELETE SET NULL,
+                FOREIGN KEY (merged_into_id) REFERENCES wall_segments(id) ON DELETE SET NULL,
                 UNIQUE(project_id, segment_uid)
             )
         """)
@@ -141,10 +147,79 @@ class DatabaseManager:
                 FOREIGN KEY (segment_id) REFERENCES wall_segments(id) ON DELETE CASCADE
             )
         """)
-        
+
+        # 合併線段記錄表 - 追蹤平行牆體合併關係
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS merged_segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                primary_segment_id INTEGER NOT NULL,
+                merged_segment_id INTEGER NOT NULL,
+                parallel_distance REAL NOT NULL,
+                overlap_length REAL NOT NULL,
+                overlap_start_x REAL,
+                overlap_start_y REAL,
+                overlap_end_x REAL,
+                overlap_end_y REAL,
+                merge_method TEXT DEFAULT 'auto',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY (primary_segment_id) REFERENCES wall_segments(id) ON DELETE CASCADE,
+                FOREIGN KEY (merged_segment_id) REFERENCES wall_segments(id) ON DELETE CASCADE,
+                UNIQUE(primary_segment_id, merged_segment_id)
+            )
+        """)
+
         self.conn.commit()
+
+        # 執行資料庫遷移（為既有資料表新增欄位）- 必須在建立索引之前
+        self._migrate_database()
+
+        # 建立索引以提升查詢效能（在遷移之後，確保欄位存在）
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_segments_category
+            ON wall_segments(category_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_segments_merged
+            ON wall_segments(is_merged, merged_into_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_merged_primary
+            ON merged_segments(primary_segment_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_merged_secondary
+            ON merged_segments(merged_segment_id)
+        """)
+
+        self.conn.commit()
+
         print("[OK] 資料表結構已建立")
-    
+
+    def _migrate_database(self):
+        """資料庫遷移 - 為既有資料表新增欄位"""
+        cursor = self.conn.cursor()
+
+        # 檢查並新增 wall_categories 的新欄位
+        try:
+            cursor.execute("SELECT wall_thickness FROM wall_categories LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE wall_categories ADD COLUMN wall_thickness REAL DEFAULT NULL")
+            cursor.execute("ALTER TABLE wall_categories ADD COLUMN wall_thickness_tolerance REAL DEFAULT 1.0")
+            print("[OK] 已新增 wall_categories.wall_thickness 欄位")
+
+        # 檢查並新增 wall_segments 的新欄位
+        try:
+            cursor.execute("SELECT is_merged FROM wall_segments LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE wall_segments ADD COLUMN is_merged INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE wall_segments ADD COLUMN merged_into_id INTEGER DEFAULT NULL")
+            cursor.execute("ALTER TABLE wall_segments ADD COLUMN merge_excluded INTEGER DEFAULT 0")
+            print("[OK] 已新增 wall_segments 合併相關欄位")
+
+        self.conn.commit()
+
     # ==================== 專案管理 ====================
     
     def create_project(self, name: str, source_file: str = None, notes: str = None) -> int:
@@ -289,13 +364,14 @@ class DatabaseManager:
     
     def update_category(self, category_id: int, **kwargs) -> bool:
         """更新牆類型"""
-        allowed_fields = ['category_code', 'category_name', 'height_type', 
-                         'height_formula', 'color', 'line_weight', 'display_order']
+        allowed_fields = ['category_code', 'category_name', 'height_type',
+                         'height_formula', 'color', 'line_weight', 'display_order',
+                         'wall_thickness', 'wall_thickness_tolerance']
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
-        
+
         if not updates:
             return False
-        
+
         set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
         cursor = self.conn.cursor()
         cursor.execute(
@@ -418,27 +494,58 @@ class DatabaseManager:
         return cursor.rowcount > 0
     
     # ==================== 統計查詢 ====================
-    
-    def get_summary(self, project_id: int) -> List[dict]:
-        """取得專案的牆長度統計"""
+
+    def get_summary(self, project_id: int, include_merged: bool = False) -> List[dict]:
+        """
+        取得專案的牆長度統計
+
+        Args:
+            project_id: 專案 ID
+            include_merged: 是否包含已合併的線段（預設 False，排除已合併線段）
+        """
         cursor = self.conn.cursor()
-        cursor.execute("""
-            SELECT 
-                wc.id as category_id,
-                wc.category_code,
-                wc.category_name,
-                wc.color,
-                wc.height_type,
-                wc.height_formula,
-                COUNT(ws.id) as segment_count,
-                COALESCE(SUM(ws.length), 0) as total_length
-            FROM wall_categories wc
-            LEFT JOIN wall_segments ws ON wc.id = ws.category_id AND ws.project_id = wc.project_id
-            WHERE wc.project_id = ?
-            GROUP BY wc.id
-            ORDER BY wc.display_order
-        """, (project_id,))
-        
+
+        if include_merged:
+            # 包含所有線段
+            cursor.execute("""
+                SELECT
+                    wc.id as category_id,
+                    wc.category_code,
+                    wc.category_name,
+                    wc.color,
+                    wc.height_type,
+                    wc.height_formula,
+                    wc.wall_thickness,
+                    COUNT(ws.id) as segment_count,
+                    COALESCE(SUM(ws.length), 0) as total_length
+                FROM wall_categories wc
+                LEFT JOIN wall_segments ws ON wc.id = ws.category_id AND ws.project_id = wc.project_id
+                WHERE wc.project_id = ?
+                GROUP BY wc.id
+                ORDER BY wc.display_order
+            """, (project_id,))
+        else:
+            # 排除已合併線段
+            cursor.execute("""
+                SELECT
+                    wc.id as category_id,
+                    wc.category_code,
+                    wc.category_name,
+                    wc.color,
+                    wc.height_type,
+                    wc.height_formula,
+                    wc.wall_thickness,
+                    COUNT(ws.id) as segment_count,
+                    COALESCE(SUM(ws.length), 0) as total_length
+                FROM wall_categories wc
+                LEFT JOIN wall_segments ws ON wc.id = ws.category_id
+                    AND ws.project_id = wc.project_id
+                    AND (ws.is_merged = 0 OR ws.is_merged IS NULL)
+                WHERE wc.project_id = ?
+                GROUP BY wc.id
+                ORDER BY wc.display_order
+            """, (project_id,))
+
         return [dict(row) for row in cursor.fetchall()]
     
     def get_uncategorized_summary(self, project_id: int) -> dict:

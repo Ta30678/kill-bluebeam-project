@@ -9,6 +9,7 @@ import os
 import json
 from database import DatabaseManager
 from dxf_parser import DXFParser
+from wall_merger import WallMerger, pairs_to_dict
 
 app = Flask(__name__, static_folder='frontend', static_url_path='')
 CORS(app)
@@ -24,6 +25,9 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max (支援大型 
 
 # 資料庫實例
 db = DatabaseManager(DB_PATH)
+
+# 牆體合併處理器
+merger = WallMerger(db)
 
 
 def allowed_file(filename):
@@ -301,25 +305,150 @@ def update_segment_category(segment_id):
     return jsonify({"success": success})
 
 
+# ==================== 牆體合併 API ====================
+
+@app.route('/api/categories/<int:category_id>/thickness', methods=['PUT'])
+def update_category_thickness(category_id):
+    """設定牆類型的牆厚度"""
+    data = request.json
+    wall_thickness = data.get('wall_thickness')
+    wall_thickness_tolerance = data.get('wall_thickness_tolerance', 1.0)
+
+    success = db.update_category(
+        category_id,
+        wall_thickness=wall_thickness,
+        wall_thickness_tolerance=wall_thickness_tolerance
+    )
+    return jsonify({"success": success})
+
+
+@app.route('/api/projects/<int:project_id>/detect-parallels', methods=['POST'])
+def detect_parallel_walls(project_id):
+    """偵測平行牆體"""
+    data = request.json or {}
+    category_ids = data.get('category_ids')  # 可選，None 表示全部
+    auto_apply = data.get('auto_apply', False)
+
+    # 偵測所有平行線對
+    all_pairs = merger.find_all_parallel_pairs(project_id, category_ids)
+
+    # 轉換為可序列化格式
+    result = {}
+    total_pairs = 0
+    for cat_id, pairs in all_pairs.items():
+        result[cat_id] = pairs_to_dict(pairs)
+        total_pairs += len(pairs)
+
+    # 如果 auto_apply，自動套用合併
+    merge_result = None
+    if auto_apply and total_pairs > 0:
+        # 展平所有 pairs
+        flat_pairs = []
+        for pairs in all_pairs.values():
+            flat_pairs.extend(pairs)
+        merge_result = merger.apply_merging(project_id, flat_pairs)
+
+    response = {
+        "success": True,
+        "pairs_found": total_pairs,
+        "pairs_by_category": result
+    }
+
+    if merge_result:
+        response["merge_result"] = {
+            "pairs_applied": merge_result.pairs_applied,
+            "segments_merged": merge_result.segments_merged,
+            "total_length_saved": merge_result.total_length_saved
+        }
+
+    return jsonify(response)
+
+
+@app.route('/api/projects/<int:project_id>/apply-merging', methods=['POST'])
+def apply_wall_merging(project_id):
+    """套用牆體合併"""
+    data = request.json
+    pairs_data = data.get('pairs', [])
+
+    if not pairs_data:
+        return jsonify({"success": False, "error": "沒有提供要合併的線對"}), 400
+
+    # 轉換為 ParallelPair 物件
+    from geometry_utils import ParallelPair
+    pairs = []
+    for p in pairs_data:
+        pair = ParallelPair(
+            primary_id=p['primary_id'],
+            secondary_id=p['secondary_id'],
+            distance=p.get('distance', 0),
+            overlap_length=p.get('overlap_length', 0),
+            overlap_region={
+                'start': p.get('overlap_start', (0, 0)),
+                'end': p.get('overlap_end', (0, 0))
+            } if 'overlap_start' in p else None
+        )
+        pairs.append(pair)
+
+    result = merger.apply_merging(project_id, pairs)
+
+    return jsonify({
+        "success": True,
+        "pairs_applied": result.pairs_applied,
+        "segments_merged": result.segments_merged,
+        "total_length_saved": result.total_length_saved
+    })
+
+
+@app.route('/api/projects/<int:project_id>/clear-merging', methods=['POST'])
+def clear_wall_merging(project_id):
+    """清除牆體合併狀態"""
+    data = request.json or {}
+    category_id = data.get('category_id')  # 可選，只清除特定類型
+
+    count = merger.clear_merging(project_id, category_id)
+
+    return jsonify({
+        "success": True,
+        "segments_cleared": count
+    })
+
+
+@app.route('/api/segments/<int:segment_id>/merge-exclude', methods=['PUT'])
+def set_segment_merge_exclude(segment_id):
+    """設定線段的合併排除狀態"""
+    data = request.json
+    exclude = data.get('exclude', True)
+
+    success = merger.set_merge_excluded(segment_id, exclude)
+
+    return jsonify({"success": success})
+
+
 # ==================== 統計 API ====================
 
 @app.route('/api/projects/<int:project_id>/summary', methods=['GET'])
 def get_summary(project_id):
     """取得統計摘要"""
-    summary = db.get_summary(project_id)
+    include_merged = request.args.get('include_merged', 'false').lower() == 'true'
+
+    summary = db.get_summary(project_id, include_merged=include_merged)
     uncategorized = db.get_uncategorized_summary(project_id)
-    
+
     # 計算總長度
     total_length = sum(row['total_length'] for row in summary)
     total_count = sum(row['segment_count'] for row in summary)
-    
+
+    # 取得合併統計
+    merge_stats = merger.get_merge_statistics(project_id)
+
     return jsonify({
         "success": True,
         "data": {
             "by_category": summary,
             "uncategorized": uncategorized,
             "total_length": total_length,
-            "total_count": total_count
+            "total_count": total_count,
+            "merge_statistics": merge_stats
         }
     })
 
@@ -428,6 +557,12 @@ if __name__ == '__main__':
     print("\n  檔案處理:")
     print("    POST /api/upload                            - 上傳 DXF 檔案")
     print("    POST /api/parse                             - 解析 DXF 並建立專案")
+    print("\n  牆體合併:")
+    print("    PUT  /api/categories/<id>/thickness         - 設定牆厚度")
+    print("    POST /api/projects/<id>/detect-parallels    - 偵測平行牆")
+    print("    POST /api/projects/<id>/apply-merging       - 套用合併")
+    print("    POST /api/projects/<id>/clear-merging       - 清除合併")
+    print("    PUT  /api/segments/<id>/merge-exclude       - 排除合併")
     print("\n  統計查詢:")
     print("    GET  /api/projects/<id>/summary             - 取得專案統計")
     print("    GET  /api/buildings/<id>/summary            - 取得棟別統計")

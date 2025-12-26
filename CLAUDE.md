@@ -64,20 +64,34 @@ Wall Quantity Calculator (牆量計算工具) - A Python/Flask web application t
 # Install dependencies
 pip install flask flask-cors ezdxf werkzeug
 
-# Create a test DXF file for development
+# Run the web server (serves on http://localhost:5000)
+python app.py
+
+# Create a simple test DXF file for development
 python create_test_dxf.py
 
-# Test DXF parsing with test file
+# Test DXF parsing (update file paths in script first)
 python test_dxf.py
+
+# Test with local DXF files
+python test_local_dxf.py
+
+# Test with real DXF files
+python test_real_dxf.py
 
 # Test database structure with sample data
 python test_database.py
 
-# Run the web server (serves on http://localhost:5000)
-python app.py
+# Test API endpoints
+python test_api.py
 ```
 
-**Note**: When running `test_dxf.py`, update the file paths in the script to match your local DXF files.
+**File Path Notes**:
+- Code may contain hardcoded Linux paths like `/home/claude/wall-quantity-calculator/`
+- When working on Windows, use relative paths or `os.path.join()` for cross-platform compatibility
+- Test DXF files may be in `建築底圖test/` directory
+- Uploaded files are stored in `uploads/` directory (auto-created)
+- Database file: `wall_calculator.db` (or `test_wall_calculator.db` for tests)
 
 ## Architecture
 
@@ -139,20 +153,29 @@ python app.py
 
 ## Development Status
 
-### Completed
-- DXF 解析器（LINE、LWPOLYLINE、POLYLINE 提取與長度計算）
-- 多編碼支援（UTF-8、CP950、GBK、自動修復模式）
-- SQLite 資料庫結構（含 buildings/floors 階層）
-- Flask API 基礎框架
-- Canvas 介面（平移、縮放、選取、分類編輯）
+### ✅ Completed Backend
+- **DXF Parser**:
+  - LINE, LWPOLYLINE, POLYLINE, ARC, CIRCLE, SPLINE entities
+  - INSERT (block) expansion with transformations
+  - Multi-encoding support (UTF-8, CP950, GBK, auto-recovery mode)
+  - Length calculation for all entity types
+  - Successfully tested with 138MB files (118,642 segments)
+- **Database**: Full SQLite schema with buildings/floors hierarchy
+- **Flask API**: Complete REST API with all CRUD endpoints
+- **Statistics**: Summary queries by project/building/floor
 
-### Priority TODO
-1. **API 整合**：將 buildings/floors 資料表整合到 API endpoints
-2. **圖層對應 UI**：拖拉式設定 DXF 圖層 → 牆類型映射
-3. **Undo/Redo**：基於 edit_history 表實作
-4. **疊圖功能**（增強）：建築圖 + 結構圖半透明疊合
-5. **高度公式計算**：自動計算牆體積（長度 × 高度 × 厚度）
-6. **分棟分樓層統計**：依樓層匯出統計報表
+### ⚠️ Partial Implementation
+- **Buildings/Floors API**: Endpoints exist but not integrated with frontend
+- **Canvas Interface**: Basic structure exists, drawing not implemented
+
+### ❌ Not Yet Implemented
+1. **Frontend Canvas Drawing**: Rendering DXF segments on canvas
+2. **Layer Mapping UI**: Visual interface for DXF layer → category assignment
+3. **Layer Selection**: UI for selecting which layers to calculate
+4. **Undo/Redo**: Using edit_history table
+5. **Overlay Feature**: Architectural + structural drawing overlay
+6. **Height Formula Calculation**: Volume calculation (length × height × thickness)
+7. **CSV Export**: Frontend integration with export endpoint
 
 ## Performance Considerations
 
@@ -173,23 +196,44 @@ python app.py
 
 ## Important Notes
 
-### File Paths
-- Code contains hardcoded paths like `/home/claude/wall-quantity-calculator/` that need adjustment for local environment
-- When modifying paths in [app.py:17](app.py#L17) and [app.py:25](app.py#L25), use relative paths or environment variables
-- Uploaded DXF files are stored in `uploads/` directory (auto-created)
-- Database file is `wall_calculator.db` (or `test_wall_calculator.db` for tests)
+### File Paths and Environment
+- Code contains hardcoded Linux paths like `/home/claude/wall-quantity-calculator/`
+- **When working on Windows**: Use `os.path.join(os.getcwd(), ...)` for cross-platform compatibility
+- Uploaded DXF files: `uploads/` directory (auto-created)
+- Database file: `wall_calculator.db` (or `test_wall_calculator.db` for tests)
+- Test DXF files may be in `建築底圖test/` directory
+
+### DXF Encoding Support
+The parser includes robust encoding handling for files from different CAD systems:
+- Attempts multiple encodings: default → UTF-8 → CP950 (Traditional Chinese) → GBK (Simplified Chinese) → auto-recovery
+- Successfully handles files from various sources and AutoCAD versions
+- If parsing fails, suggests using ODA File Converter or AutoCAD to re-save as DXF 2018 format
 
 ### Testing
 - [create_test_dxf.py](create_test_dxf.py) - Creates a simple test DXF with A-WALL-EXT, A-WALL-INT, A-WALL-RC layers
-- [test_dxf.py](test_dxf.py) - Tests DXF parsing with real files (update file paths before running)
-- [test_database.py](test_database.py) - Demonstrates building/floor hierarchy with sample data
-- Test DXF files may be located in `建築底圖test/` directory
+- [test_dxf.py](test_dxf.py) - Generic DXF parsing test (update file paths)
+- [test_local_dxf.py](test_local_dxf.py) - Tests with local DXF files
+- [test_real_dxf.py](test_real_dxf.py) - Tests with real project files
+- [test_database.py](test_database.py) - Demonstrates building/floor hierarchy
+- [test_api.py](test_api.py) - API endpoint testing
+
+**Tested Successfully**:
+- Small files (20KB, 6 segments): ✅
+- Medium files (95MB, 25,726 segments, 441 layers): ✅
+- Large files (138MB, 118,642 segments): ✅
 
 ### Project Structure
-- The `claude skills/` directory contains unrelated Claude AI skill examples (not part of this project)
+- The `claude skills/` directory contains unrelated Claude AI skill examples (ignore this)
 - Frontend is a single HTML file at [index.html](index.html) - no build step required
+- [index-ref.html](index-ref.html) may be a reference implementation
 
 ### Core Design Principles
 - **無結構圖也能完整使用**：Tool functions fully without structural drawings; overlay is optional enhancement
 - **圖層為主要分類依據**：Layer-based classification is primary, manual adjustment is secondary
 - **資料可複用**：Layer mappings can be reused across projects from the same architecture firm
+
+### Known Limitations
+- Frontend drawing not yet implemented - canvas is blank after upload
+- Layer selection UI not yet implemented
+- CSV export button exists but functionality incomplete
+- Statistics display on frontend needs implementation
